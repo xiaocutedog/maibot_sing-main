@@ -1,0 +1,88 @@
+[plugin]
+enabled = true
+config_version = "0.2.0"
+
+[rvc]
+# RVC 安装根目录（可迁移核心：迁移时只改这里）
+rvc_root = "D:/RVC20240604Nvidia"
+# RVC Python 解释器路径，留空自动使用 {rvc_root}/runtime/python.exe
+python_path = ""
+# sidecar 监听端口（避开 RVC WebUI 的 7897）
+port = 7898
+# 插件加载时自动拉起 sidecar（端口已有服务则复用）
+auto_start = true
+# 默认音色模型（assets/weights 下的 .pth 文件名，含扩展名）
+default_model = ""
+# 音高提取算法: pm / harvest / crepe / rmvpe
+f0_method = "rmvpe"
+# 变调（半音数，升八度 12，降八度 -12）
+f0_up_key = 0
+# 检索特征占比 (0~1)，过高会产生金属感/沙哑
+index_rate = 0.5
+# harvest 中值滤波半径（>=3 可削弱哑音）
+filter_radius = 3
+# 后处理重采样至最终采样率，0 为不重采样
+resample_sr = 0
+# 音量包络融合比例 (0~1)
+rms_mix_rate = 0.25
+# 清辅音保护力度 (0~0.5)，过低会口齿不清
+protect = 0.4
+# UVR5 人声分离模型名（assets/uvr5_weights 下，不含 .pth）
+uvr_model = "HP2_all_vocals"
+# 人声提取激进程度 (0~20)
+uvr_agg = 10
+# 外部 UVR5 权重目录（如 Ultimate Vocal Remover 的 VR_Models 绝对路径），留空用 RVC 自带 uvr5_weights
+# 示例：配合 uvr_model = "6_HP-Karaoke-UVR" 使用去伴奏质量更高的模型
+uvr_weights_dir = ""
+# 自动变调：按示例音频与歌曲人声的音高差自动计算变调（model_keys 命中时不生效）
+auto_key = false
+# 自动变调微调（半音）：在自动计算结果上额外升/降，正=升、负=降
+auto_key_offset = 0
+# 自动变调幅度上限（半音绝对值）：变调过大音色会发哑，高音哑就调低此值（如 3）
+auto_key_max = 5
+# 音色示例音频路径（该音色的唱歌片段，作为自动变调的基准音高）
+sample_audio = ""
+# 翻唱语音缓存保留天数（按文件修改时间计算，0=永久保留）
+voice_cache_retention_days = 5
+# 语音条本地缓存目录（NapCat 可见的绝对路径），留空用插件运行时目录
+voice_cache_dir = ""
+
+# 按模型自动变调映射（模型文件名(含 .pth) → 变调半音数），命中时覆盖 f0_up_key
+# 文件名含 "." 等特殊字符，键需加引号，示例：
+# "LuoXiaohei_48.pth" = 3
+[rvc.model_keys]
+
+[mimo]
+# MiMo API Key（说话功能的基础 TTS）
+api_key = ""
+api_base_url = "https://api.xiaomimimo.com/v1"
+# 语音模式: preset(预置音色) 或 clone(音色复刻)
+voice_mode = "preset"
+# 预置音色 ID（仅 preset 模式生效）
+preset_voice = "mimo_default"
+# 音色复刻参考音频文件路径（仅 clone 模式生效）
+reference_audio = ""
+# 说话功能：TTS 输出后再经 RVC 换音色；关闭则直接发送 TTS 原声
+rvc_after_tts = true
+
+[music]
+# 默认音乐平台: 163(网易云) 或 qq(QQ音乐)
+default_platform = "163"
+# 搜索结果数量
+search_limit = 5
+# 网易云账号密码登录（手机号或邮箱；填写后插件加载时自动登录并缓存登录态）
+netease_account = ""
+netease_password = ""
+# 手机号区号（手机号登录时生效）
+netease_countrycode = "86"
+# cookie 回退（优先级低于账号密码登录）
+netease_music_u = ""
+netease_csrf = ""
+# QQ 音乐：无密码登录（腾讯风控限制），推荐发 /音乐登录 qq 扫码登录；
+# 下面是手动抓 cookie 的回退
+qq_uin = ""
+qq_key = ""
+
+[components]
+command_enabled = true
+tool_enabled = true

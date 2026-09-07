@@ -1,0 +1,56 @@
+{
+  "manifest_version": 2,
+  "id": "xiaocutedog.maibot-sing",
+  "version": "1.1.0",
+  "name": "让麦麦说话和唱歌",
+  "description": "用 RVC 克隆音色翻唱歌曲和说话，内嵌音乐搜索（网易云/QQ）与 MiMo TTS",
+  "author": {
+    "name": "xiaocutedog",
+    "url": "https://github.com/xiaocutedog/"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/xiaocutedog/maibot_sing-main/"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.5.1",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "aiohttp",
+      "version_spec": ">=3.8.0"
+    },
+    {
+      "type": "python_package",
+      "name": "httpx",
+      "version_spec": ">=0.27.0"
+    },
+    {
+      "type": "python_package",
+      "name": "cryptography",
+      "version_spec": ">=42.0.0"
+    },
+    {
+      "type": "python_package",
+      "name": "segno",
+      "version_spec": ">=1.6.0"
+    }
+  ],
+  "capabilities": [
+    "send.text",
+    "send.custom",
+    "send.image"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
