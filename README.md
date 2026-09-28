@@ -350,3 +350,30 @@ maibot_sing-main/
 └── sidecar/
     └── server.py          # RVC sidecar（Python 3.9）：分离 / 转换 / 混伴奏 / 自动变调 / 令牌鉴权
 ```
+
+---
+
+## 特别鸣谢
+
+本项目在开发过程中使用了以下优秀的开源项目，特此致谢：
+
+- **[ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)** —— MaiBot 的 Xiaomi MiMo v2.5 音色克隆语音回复插件。
+
+- **[maibot-music](https://github.com/pan-ice/maibot-music)** —— MaiBot 音乐插件，支持搜索点歌、解析音乐链接、发送语音音频。
+
+- **[Retrieval-based-Voice-Conversion-WebUI (RVC)](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI)** —— 简单易用的语音音色转换/变声器框架，支持用少量语音数据快速训练高质量音色转换模型。
+
+- **[Ultimate Vocal Remover (UVR5)](https://github.com/leebufan/Ultimate-Vocal-Remover)** —— 基于深度神经网络的开源人声伴奏分离工具，是目前最优秀的人声分离工具之一。
+
+---
+
+## 更新公告
+
+### v1.1.1 更新
+
+1. 安全修复：登录二维码与 /163cookie 只能在私聊发送（群聊会被拒绝）
+2. sidecar 加随机令牌鉴权，同主机其它进程无法再调用推理接口，插件也不再给未知 PID 发信号；
+3. 登录信息只显示昵称，日志不记账号；
+4. 下载外部音频直链会拦截内网/云元数据地址。
+
+注：升级需先装新依赖 segno，并手动结束旧的 sidecar 进程后重启插件。 ⚠️ 仅用于克隆已获授权的音色，禁止伪造他人声音。
