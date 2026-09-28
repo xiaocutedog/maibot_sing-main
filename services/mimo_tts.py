@@ -18,7 +18,8 @@ import aiohttp
 class MiMoTTSService:
     """MiMo TTS 服务。"""
 
-    DEFAULT_API_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+    # 默认地址与 config.example.toml、plugin.py 的 MiMoConfig 保持一致（api 为主）
+    DEFAULT_API_BASE_URL = "https://api.xiaomimimo.com/v1"
     MODEL_PRESET = "mimo-v2.5-tts"
     MODEL_CLONE = "mimo-v2.5-tts-voiceclone"
 

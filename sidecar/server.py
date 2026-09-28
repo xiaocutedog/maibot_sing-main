@@ -8,28 +8,40 @@ RVC 推理链依赖 Python 3.9 运行时，而 MaiBot 运行于 Python 3.12，
 
 启动方式::
 
-    runtime/python.exe sidecar/server.py --rvc-root D:/RVC20240604Nvidia --port 7898
+    runtime/python.exe sidecar/server.py --rvc-root D:/RVC20240604Nvidia --port 7898 --token <令牌>
+
+鉴权:
+    所有端点都要求请求头 ``X-Sidecar-Token`` 与令牌一致，令牌不匹配返回 401。
+    令牌来源三选一（按优先级）：
+      ``--token <值>``   手动指定（手动启动调试时用，插件侧填 rvc.sidecar_token 可复用）
+      ``--token-stdin``  从 stdin 第一行读取（插件拉起时使用，令牌不经过命令行/环境变量）
+      都不给             随机生成并打印到 stdout
 
 端点:
-    GET  /health    健康检查，返回 {"status": "ready", "device": "cuda:0"}
+    GET  /health    健康检查，返回 {"status": "ready", "device": "cuda:0", "version", "auth"}
     GET  /models    列出可用音色模型（weight_root 顶层 *.pth 文件名）
     POST /separate  人声分离（UVR5），请求体为整曲音频，返回人声 wav
     POST /convert   音色转换（RVC），请求体为原声音频，返回换音色 wav
     POST /cover     翻唱一站式：分离 →（纯人声时裁剪静音）→ 换音色 →（可选混伴奏，
                     混伴奏时人声保留整段以对齐原曲时间轴）
+    POST /shutdown  请求进程自行退出（供插件回收自己拉起的旧版本进程）
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import io
 import json
 import math
 import os
+import secrets
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -44,10 +56,64 @@ import torch
 _parser = argparse.ArgumentParser(add_help=True)
 _parser.add_argument("--rvc-root", required=True, help="RVC 安装根目录")
 _parser.add_argument("--port", type=int, default=7898, help="监听端口")
+_parser.add_argument("--token", default="", help="鉴权令牌（手动启动时指定；留空见 --token-stdin）")
+_parser.add_argument(
+    "--token-stdin",
+    action="store_true",
+    help="从 stdin 第一行读取鉴权令牌（插件拉起时使用，避免令牌出现在命令行）",
+)
 _args, _unknown = _parser.parse_known_args()
 
 _RVC_ROOT: str = os.path.abspath(_args.rvc_root)
 _PORT: int = int(_args.port)
+
+# 令牌握手盐值：插件侧（rvc_client.auth_proof）必须与此保持一致
+_AUTH_PROOF_SALT = b"maibot-sing-sidecar-v1"
+
+
+def _auth_proof(token: str) -> str:
+    """令牌握手校验值：能让调用方确认服务端确实持有同一令牌。"""
+    return hmac.new(token.encode("utf-8"), _AUTH_PROOF_SALT, hashlib.sha256).hexdigest()[:16]
+
+
+def _read_token_from_stdin(timeout: float = 10.0) -> str:
+    """从 stdin 第一行读取令牌；超时或读失败返回空串（调用方会退回随机令牌）。"""
+    line = ""
+
+    def _reader() -> None:
+        nonlocal line
+        try:
+            line = sys.stdin.readline() if sys.stdin is not None else ""
+        except Exception as exc:  # noqa: BLE001 — 读取失败按空令牌处理，由调用方兜底
+            print(f"从 stdin 读取令牌失败: {exc}", flush=True)
+
+    thread = threading.Thread(target=_reader, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        print(f"未在 {timeout:.0f} 秒内从 stdin 读到令牌，改用随机令牌", flush=True)
+        return ""
+    return (line or "").strip()
+
+
+def _resolve_token() -> str:
+    """确定本次运行的鉴权令牌；永远不为空，未显式指定时随机生成并打印。"""
+    token = _args.token.strip()
+    if not token and _args.token_stdin:
+        token = _read_token_from_stdin()
+    if token:
+        return token
+    generated = secrets.token_urlsafe(32)
+    print(f"RVC sidecar 未指定令牌，已随机生成: {generated}", flush=True)
+    print(
+        "（手动调试请在请求头带 X-Sidecar-Token；要让插件复用它，"
+        "请把该令牌填入 config.toml 的 rvc.sidecar_token）",
+        flush=True,
+    )
+    return generated
+
+
+_TOKEN: str = _resolve_token()
 
 # 切到 RVC 根目录并加入 sys.path，使 infer / configs 等模块可导入
 os.chdir(_RVC_ROOT)
@@ -81,7 +147,9 @@ _VC = VC(_CONFIG)
 _LOCK = threading.Lock()
 # sidecar 代码版本：修改 server.py 的处理逻辑时递增，
 # 插件据此检测端口上是否残留旧代码进程（陈旧进程会被自动终止重启）
-SIDECAR_VERSION = "4"
+SIDECAR_VERSION = "5"
+# HTTP 服务实例（/shutdown 需要它来停止 serve_forever 循环）
+_SERVER: "ThreadingHTTPServer | None" = None
 # 已加载的模型 sid，避免重复加载同一模型
 _LAST_SID: str | None = None
 # 自动变调用的 RMVPE 音高估计模型（懒加载）
@@ -443,6 +511,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         """静默默认访问日志，避免刷屏。"""
 
+    def _authorized(self) -> bool:
+        """校验 ``X-Sidecar-Token`` 请求头，防止同主机其它进程直接调用推理接口。"""
+        provided = str(self.headers.get("X-Sidecar-Token", "") or "")
+        return bool(provided) and secrets.compare_digest(provided, _TOKEN)
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -458,14 +531,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(audio)
 
+    def _reject_unauthorized(self) -> None:
+        """拒绝未通过令牌握手的请求。
+
+        强制关闭连接，避免未读的请求体残留到下一个请求上。
+        """
+        self.close_connection = True
+        self._send_json(401, {"error": "unauthorized: 缺少或错误的 X-Sidecar-Token"})
+
     def do_GET(self) -> None:
+        if not self._authorized():
+            self._reject_unauthorized()
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send_json(200, {
                 "status": "ready",
                 "device": _CONFIG.device,
                 "version": SIDECAR_VERSION,
-                "pid": os.getpid(),
+                "auth": _auth_proof(_TOKEN),
             })
             return
         if parsed.path == "/models":
@@ -474,6 +558,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            self._reject_unauthorized()
+            return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         try:
@@ -483,6 +570,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_convert(query)
             elif parsed.path == "/cover":
                 self._handle_cover(query)
+            elif parsed.path == "/shutdown":
+                # 先回响应再关闭服务，避免调用方读到连接中断
+                self._send_json(200, {"status": "shutting down"})
+                self.close_connection = True
+                threading.Thread(target=_shutdown_server, daemon=True).start()
             else:
                 self._send_json(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001 — 统一返回错误，避免进程崩溃
@@ -684,10 +776,19 @@ class Handler(BaseHTTPRequestHandler):
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _shutdown_server(delay: float = 0.2) -> None:
+    """等响应送达后停止服务循环（由 /shutdown 触发，进程随后正常退出）。"""
+    time.sleep(delay)
+    server = _SERVER
+    if server is not None:
+        server.shutdown()
+
+
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", _PORT), Handler)
-    print(f"RVC sidecar listening on 127.0.0.1:{_PORT}", flush=True)
-    server.serve_forever()
+    global _SERVER
+    _SERVER = ThreadingHTTPServer(("127.0.0.1", _PORT), Handler)
+    print(f"RVC sidecar listening on 127.0.0.1:{_PORT} (token auth enabled)", flush=True)
+    _SERVER.serve_forever()
 
 
 if __name__ == "__main__":

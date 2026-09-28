@@ -24,6 +24,13 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from ..services.net_guard import (
+    MAX_REDIRECTS,
+    REDIRECT_STATUS,
+    ensure_external_url,
+    resolve_redirect,
+)
+
 logger = __import__("logging").getLogger("maibot-sing.music")
 
 _REQUEST_TIMEOUT = 10
@@ -173,6 +180,23 @@ def _eapi_encrypt(url: str, params: dict[str, Any]) -> str:
     md5_hash = hashlib.md5(sign_src.encode()).hexdigest()
     sign_text = f"{url}-36cd479b6b5-{data_text}-36cd479b6b5-{md5_hash}"
     return _aes_ecb_encrypt(_EAPI_KEY, sign_text.encode()).hex().upper()
+
+
+async def _follow_song_url(client: httpx.AsyncClient, url: str) -> str:
+    """逐跳跟随跳转取回最终 URL，每一跳都校验落点不指向内网。
+
+    网易云的直链接口靠 302 到 CDN，若直接让 httpx 跟随跳转，
+    平台侧一个指向内网/云元数据地址的 302 就会被插件当成正常取链请求发出去。
+    """
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        await ensure_external_url(current)
+        resp = await client.get(current, follow_redirects=False)
+        if resp.status_code in REDIRECT_STATUS:
+            current = resolve_redirect(current, resp.headers.get("location", ""))
+            continue
+        return str(resp.url)
+    raise MusicSearchError(f"取链跳转次数超过 {MAX_REDIRECTS} 次: {url}")
 
 
 class MusicSearchClient:
@@ -802,13 +826,12 @@ class MusicSearchClient:
         except Exception:
             logger.debug("网易云标准接口取链失败: %s", song_id)
 
-        # 3. 直链重定向兜底
+        # 3. 直链重定向兜底（逐跳校验落点，不把跳转交给 httpx 自动跟随）
         try:
-            resp = await self._netease_client.get(
+            final_url = await _follow_song_url(
+                self._netease_client,
                 f"https://music.163.com/song/media/outer/url?id={song_id}.mp3",
-                follow_redirects=True,
             )
-            final_url = str(resp.url)
             if final_url and any(ext in final_url for ext in (".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac")):
                 return final_url
         except Exception:

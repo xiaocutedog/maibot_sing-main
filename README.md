@@ -1,18 +1,14 @@
 # 让麦麦说话和唱歌（maibot-sing）
 
-## 准备更新的功能：
-1. 可以让麦麦发送文件
-2. 修复网易云扫码登录
-3. 说话会有莫名其妙的bug不走RVC
-
----
-
 用 **RVC 克隆音色** 翻唱歌曲和说话。内嵌音乐搜索（网易云 / QQ 音乐）与 MiMo TTS，通过一个独立的 RVC sidecar 进程完成歌声转换，实现「点歌 → 人声分离 → 换音色 → 混伴奏 → 发送语音条」的完整闭环。
+
+> ⚠️ **仅克隆已获授权的音色。** 本插件是音色克隆工具，只应用于你自己的声音、或已取得明确授权的声音（例如本人已同意、或已获合法授权的虚拟角色）。**严禁**用他人声音伪造身份、制作虚假内容、冒充他人发言，或用于任何侵犯他人声音权益、肖像权、名誉权的用途。使用者需自行确保音源与音色的合法来源，并自行承担由此产生的一切法律责任；因滥用造成的后果与项目作者无关。
 
 - 🎤 **翻唱**：支持纯人声 / 带伴奏两种模式，伴奏与人声按原曲时间轴对齐
 - 🎚️ **自动变调**：提供一段音色示例音频，按示例与人声音高差自动计算变调
 - 🗣️ **说话**：MiMo TTS 合成后可选过一遍 RVC 换音色（toml 开关）
-- 🔑 **音乐登录**：网易云支持账号密码自动登录与扫码登录（`/网易云音乐登录`）；QQ 为扫码登录（`/qq音乐登录`）。二维码均发到聊天里
+- 🔑 **音乐登录**：网易云支持账号密码自动登录与扫码登录（`/网易云音乐登录`）；QQ 为扫码登录（`/qq音乐登录`）。二维码与 cookie 凭据**只在私聊中发送**
+- 🔒 **sidecar 鉴权**：sidecar 与插件用随机令牌握手，同主机其它进程无法直接调用推理接口
 - 🧹 **缓存自清理**：翻唱语音缓存默认保留 5 天，可配置
 
 ---
@@ -21,16 +17,16 @@
 
 | 功能 | 触发方式 | 说明 |
 |---|---|---|
-| 🎤 翻唱（纯人声） | `/翻唱 <歌名> [-v 模型名]` 或自然语言说「我想听你唱 XX」 | 搜歌 → UVR5 分离人声 → RVC 换音色 → 发送语音条 |
-| 🎶 翻唱（带伴奏） | 自然语言说「带伴奏唱 XX」「加上伴奏唱 XX」 | 人声分离 → 换音色 → 按原曲时间轴混入伴奏 |
+| 🎤 翻唱（纯人声） | `/翻唱 <歌名> [-v 模型名]` 或说「我想听你唱 XX」 | 搜歌 → UVR5 分离人声 → RVC 换音色 → 发送语音条 |
+| 🎶 翻唱（带伴奏） | 「带伴奏唱 XX」「加上伴奏唱 XX」 | 人声分离 → 换音色 → 按原曲时间轴混入伴奏 |
 | 🗣️ 说话 | `/说 <文本>` 或让 bot 发语音回复 | MiMo TTS 合成 → RVC 换音色（可开关）→ 发送语音条 |
 | 📋 音色列表 | `/音色列表` | 列出 RVC 可用的音色模型 |
-| 🔑 QQ 扫码登录 | `/qq音乐登录` | bot 发送登录二维码，手机 QQ 扫码确认后自动保存登录态（仅管理员） |
-| 🔑 网易云扫码登录 | `/网易云音乐登录` | 同上，用网易云音乐 App 扫码（仅管理员） |
-| 🔑 网易云密码登录 | maibot启动时自动 | 启动时用配置里的账号密码自动登录（需扫码优先时清空账号或直接扫码） |
+| 🔑 QQ 扫码登录 | `/qq音乐登录` | bot 在私聊里发送登录二维码，手机 QQ 扫码确认后自动保存登录态（仅管理员，仅私聊） |
+| 🔑 网易云扫码登录 | `/网易云音乐登录` | 同上，用网易云音乐 App 扫码（仅管理员，仅私聊） |
+| 🔑 网易云密码登录 | 自动 | 启动时用配置里的账号密码自动登录（需扫码优先时清空账号或直接扫码） |
 | 🧪 网易云登录测试 | `/163logintest` | 校验登录态，成功时显示账号昵称（仅管理员） |
-| 🧪 QQ 登录测试（未测试） | `/qqlogintest` | 校验登录态，成功时显示账号昵称（仅管理员） |
-| 🔑 网易云 cookie 登录 | `/163cookie <MUSIC_U>` | 粘贴浏览器里的 MUSIC_U 直接登录（仅管理员，扫码被风控时的兜底） |
+| 🧪 QQ 登录测试 | `/qqlogintest` | 校验登录态，成功时显示账号昵称（仅管理员） |
+| 🔑 网易云 cookie 登录 | `/163cookie <MUSIC_U>` | 粘贴浏览器里的 MUSIC_U 直接登录（仅管理员，仅私聊，扫码被风控时的兜底；用后请撤回该消息） |
 
 ### 翻唱 vs 说话（工具边界）
 
@@ -42,9 +38,10 @@
 【说话】文字 → MiMo TTS 合成原声 ────────┘
 ```
 
-已做互斥声明，但可能仍存在冲突的情况，请酌情与发送音乐卡片的插件使用：
+两个插件的 LLM 工具已做互斥声明：
 
 - `cover_song`（本插件）：**bot 亲自开口唱**——「我想听你唱XX」「你唱一首XX」「翻唱XX」
+- `search_and_play_music`（maibot-music 插件）：**发送原唱原曲**——「放一首XX」「发一首XX」「来一首XX的歌」
 
 ---
 
@@ -54,21 +51,21 @@ RVC（Retrieval-based Voice Conversion，歌声转换）推理依赖 **Python 3.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  MaiBot 插件 (Python 3.12)                           │
-│  plugin.py / rvc_client.py / music/ / services/      │
+│  MaiBot 插件 (Python 3.12)                            │
+│  plugin.py / rvc_client.py / music/ / services/        │
 └──────────────────────┬───────────────────────────────┘
-                       │ HTTP (localhost:7898)
+                       │ HTTP (127.0.0.1:7898，带 X-Sidecar-Token)
                        ▼
 ┌──────────────────────────────────────────────────────┐
-│  RVC sidecar (Python 3.9，用 RVC 自带 runtime/python. |
-|exe)                                                  │
-│  sidecar/server.py                                   │
-│    ├─ GET  /health     健康检查                       │
-│    ├─ GET  /models     列出音色模型                   │
+│  RVC sidecar (Python 3.9，用 RVC 自带 runtime/python.exe) │
+│  sidecar/server.py                                     │
+│    ├─ GET  /health     健康检查（含版本与令牌握手值）   │
+│    ├─ GET  /models     列出音色模型                    │
 │    ├─ POST /separate   UVR5 人声分离（含前后静音裁剪） │
-│    ├─ POST /convert    RVC 音色转换                   │
-│    └─ POST /cover      翻唱一站式：分离 → 换音色       │
-│                        →（可选裁剪静音/混伴奏/自动变调）│
+│    ├─ POST /convert    RVC 音色转换                    │
+│    ├─ POST /cover      翻唱一站式：分离 → 换音色       │
+│    │                   →（可选裁剪静音/混伴奏/自动变调）│
+│    └─ POST /shutdown   请进程自行退出（插件回收旧版本） │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -76,6 +73,9 @@ sidecar 由插件自动拉起，模型在进程内做单例缓存，避免每次
 
 几个关键实现细节：
 
+- **sidecar 鉴权**：插件每次启动随机生成令牌（持久化在运行时目录，重启后仍能接管自己拉起的进程），通过 **stdin** 传给 sidecar（不经过命令行与环境变量，避免被同主机其它进程读到）；请求头 `X-Sidecar-Token` 不匹配一律 401。`/health` 会返回一个基于令牌的握手校验值，插件据此确认端口上的服务确实是自己的 sidecar。
+- **只回收自己的进程**：端口上的服务通不过握手（旧版本无鉴权 sidecar、或其它程序的进程）时，插件只报错不终止——不再按 `/health` 里的 PID 给未知进程发信号；确属自己拉起的旧版本进程则通过 `/shutdown` 请它自行退出。
+- **外部下载地址校验**：音乐平台返回的直链与每一跳 302 落点都要过一遍 `services/net_guard.py`（只允许 http/https，且解析结果不能是内网/环回/链路本地/保留地址），避免平台侧被污染时插件变成访问内网或云元数据地址的出口。
 - **伴奏对齐**：混伴奏时人声保留整段（不裁剪前后静音），与伴奏按原曲时间轴逐样本混音；纯人声输出时才裁剪头尾空白。
 - **防伴奏爆音**：MDX 分离的伴奏 stem 写盘前缩放回 ±1 内（防止 PCM_16 硬削波）；混音结果以 int16 落盘。
 - **防重复发送**：语音发送带软截止（180s），超时后先按失败上报，后台继续观察最终结果——确认送达后补发一条文字说明；结果未知时绝不重发，杜绝语音条发两遍。
@@ -88,12 +88,11 @@ sidecar 由插件自动拉起，模型在进程内做单例缓存，避免每次
 | 组件 | 要求 |
 |---|---|
 | MaiBot | 已支持插件系统的版本（SDK ≥ 2.5.1） |
-| RVC | 本地完整安装（含 `runtime/python.exe` 3.9 运行时、hubert/rmvpe 特征文件） （测试环境为RVC20240604Nvidia） |
-| UVR5 | 本地完整安装（含人声分离模型文件） （测试环境为UVR5+Kim Vocal 1） |
+| RVC | 本地完整安装（含 `runtime/python.exe` 3.9 运行时、UVR5 权重、hubert/rmvpe 特征文件） |
 | GPU | 推荐 N 卡（RVC 推理走 CUDA）；无 GPU 可 CPU 跑但很慢 |
 | 网络 | 音乐搜索（网易云无需登录也可搜；QQ 搜索需登录态）、说话功能需访问 MiMo API |
 
-**RVC 与 UVR 根目录需包含以下内容：**
+**RVC 根目录需包含以下内容：**
 
 ```
 RVC/
@@ -101,13 +100,10 @@ RVC/
 ├── ffmpeg.exe                  # 音频处理（sidecar 会自动加入 PATH）
 ├── assets/
 │   ├── weights/*.pth           # 已训练的音色模型
-│   ├── uvr5_weights/*.pth      # 或使用单独的UVR
+│   ├── uvr5_weights/*.pth      # UVR5 人声分离模型
 │   ├── hubert/hubert_base.pt   # 特征提取模型
 │   └── rmvpe/rmvpe.pt          # 音高提取模型（用 rmvpe 算法时）
 └── logs/                       # 特征检索索引（.index，可选，提升相似度）
-
-Ultimate Vocal Remover/
-├── models/*.pth      # UVR5 人声分离模型
 ```
 
 ---
@@ -156,16 +152,21 @@ netease_password = ""
 
 在 MaiBot 中启用插件，加载后会自动：拉起 sidecar → 清理过期语音缓存 → 恢复/建立音乐平台登录态。
 
+sidecar 的接口都需要鉴权令牌：插件自动拉起时令牌写在运行时目录的 `sidecar_state.json`（`rvc.sidecar_token` 填了则以配置为准）。手动 curl 时把令牌放进请求头：
+
 ```bash
+# 令牌：插件运行时目录下的 sidecar_state.json 里的 "token" 字段，或配置里的 rvc.sidecar_token
+TOKEN="<你的令牌>"
+
 # 健康检查
-curl http://127.0.0.1:7898/health
-# → {"status": "ready", "device": "cuda:0"}
+curl -H "X-Sidecar-Token: $TOKEN" http://127.0.0.1:7898/health
+# → {"status": "ready", "device": "cuda:0", "version": "5", "auth": "..."}
 
 # 查看音色模型
-curl http://127.0.0.1:7898/models
+curl -H "X-Sidecar-Token: $TOKEN" http://127.0.0.1:7898/models
 ```
 
-然后在聊天中测试：
+然后在聊天中测试（登录类命令请在**私聊**里发）：
 
 ```
 /音色列表
@@ -187,6 +188,7 @@ curl http://127.0.0.1:7898/models
 | `python_path` | RVC Python 解释器，留空自动用 `{rvc_root}/runtime/python.exe` |
 | `port` | sidecar 端口，默认 7898（避开 WebUI 7897） |
 | `auto_start` | 插件加载时自动拉起 sidecar |
+| `sidecar_token` | sidecar 鉴权令牌。留空由插件自动生成并持久化（运行时目录 `sidecar_state.json`）；手动启动 sidecar 时把它 `--token` 的值填这里，插件才会复用它 |
 | `default_model` | 默认音色模型文件名（含 `.pth`） |
 | `f0_method` | 音高提取算法：`rmvpe` 效果最好；`pm` 快；`harvest` 低音好但慢；`crepe` 效果好但吃 GPU |
 | `f0_up_key` | 默认变调（半音数，升 12 = 升八度，降 8 度 = -12） |
@@ -247,8 +249,9 @@ model_keys 手动映射  >  auto_key 自动变调  >  f0_up_key 默认值
 
 - **网易云**：支持 weapi 账号密码登录。登录成功后 cookie（MUSIC_U/__csrf）缓存到插件运行时目录 `music_login_cache.json`，重启不重复登录。遇到网易云风控要求二次验证时（如 code 803）会明确报错，日志会明确报错并退回 cookie 方式。
 - **QQ 音乐**：腾讯风控不支持无浏览器的密码登录，提供**扫码登录**：发 `/qq音乐登录`，bot 把二维码发到聊天里，手机 QQ 扫码并在手机上确认即可，登录态（uin / qqmusic_key）自动缓存。
+- **登录类命令只在私聊里执行**：`/qq音乐登录`、`/网易云音乐登录`、`/163cookie` 在群里发送时不会执行，只回一句"请私聊发送"。登录二维码等同于登录态、MUSIC_U 更是直接可用的会话凭据，发到群里等于交给所有群成员，并会明文留在宿主聊天记录里。
 - **扫码指令均为管理员限定**（`permission="operator"`）：仅本地控制台与 `bot_config.toml` 中 `[plugin] permission` 列表内的用户可触发。
-- **登录测试**：`/163logintest`、`/qqlogintest` 校验当前登录态，成功只显示账号昵称（不显示账号 ID）。两条命令声明为 `permission="operator"`，仅本地控制台与 `bot_config.toml` 中 `[plugin] permission` 列表内的用户可触发（格式如 `qq:123456789`）。
+- **账号信息只显示昵称**：登录测试（`/163logintest`、`/qqlogintest`）与扫码登录结果都只显示账号昵称，不显示账号 ID（uin）；插件日志也不记录账号（手机号/邮箱）与 uin。这两条测试命令同样声明为 `permission="operator"`，仅本地控制台与 `bot_config.toml` 中 `[plugin] permission` 列表内的用户可触发（格式如 `qq:123456789`）。
 - 登录态缓存文件包含账号凭证，**不要外传**。
 
 ### `[components]` — 组件开关
@@ -262,19 +265,21 @@ model_keys 手动映射  >  auto_key 自动变调  >  f0_up_key 默认值
 
 ## 六、手动启动 sidecar（可选）
 
-默认 `auto_start = true` 由插件自动拉起。若想独立调试，可手动启动：
+默认 `auto_start = true` 由插件自动拉起。若想独立调试，可手动启动（`--token` 换成你自己定的一个随机串）：
 
 ```bash
 # Windows
-D:/RVC20240604Nvidia/runtime/python.exe sidecar/server.py --rvc-root D:/RVC20240604Nvidia --port 7898
+D:/RVC20240604Nvidia/runtime/python.exe sidecar/server.py --rvc-root D:/RVC20240604Nvidia --port 7898 --token <你的令牌>
 
 # Linux / macOS（路径按实际调整）
-./runtime/python.exe sidecar/server.py --rvc-root /path/to/RVC --port 7898
+./runtime/python.exe sidecar/server.py --rvc-root /path/to/RVC --port 7898 --token <你的令牌>
 ```
 
-手动启动后，插件会探测到端口已有服务并直接复用，不会重复拉起。
+不带 `--token` 启动时，sidecar 会随机生成一个令牌并打印在控制台——所有接口都要带 `X-Sidecar-Token` 请求头才能调用，所以请留意这行输出。
 
-> ℹ️ **代码更新后无需手动重启 sidecar**：sidecar 的 `/health` 会汇报代码版本与 PID，插件启动及配置重载时发现端口上是旧版本残留进程，会自动终止并重新拉起；每次翻唱/说话前也会自动探活，进程崩溃后被拉起。若手动调试，仍可按上述命令独立启动。
+手动启动后想让插件复用它（而不是报"端口被其它进程占用"），把同一个令牌填进 `config.toml` 的 `rvc.sidecar_token`。插件只认自己生成的令牌或配置里填的这个令牌，**不会**去终止通不过令牌握手的进程。
+
+> ℹ️ **代码更新后无需手动重启 sidecar**：sidecar 的 `/health` 会汇报代码版本，插件启动及配置重载时发现端口上是**自己拉起的**旧版本进程，会通过 `/shutdown` 请它退出后重新拉起；每次翻唱/说话前也会自动探活，进程崩溃后被拉起。若手动调试，仍可按上述命令独立启动。
 
 ---
 
@@ -293,10 +298,16 @@ D:/RVC20240604Nvidia/runtime/python.exe sidecar/server.py --rvc-root D:/RVC20240
 说话链路是「TTS 原声 → RVC 换音色」，RVC 对说话语料的转换效果弱于唱歌。可尝试调整 `index_rate`、`protect`，或换一个针对该音色训练得更好的模型。
 
 **Q：搜索 QQ 音乐报「需要登录」？**
-QQ 音乐搜索/取链需要登录态：发 `/qq音乐登录` 扫码，或在配置里填 `qq_uin` + `qq_key`。网易云搜索无需登录，登录后可获得更高音质。
+QQ 音乐搜索/取链需要登录态：私聊发 `/qq音乐登录` 扫码，或在配置里填 `qq_uin` + `qq_key`。网易云搜索无需登录，登录后可获得更高音质。
+
+**Q：在群里发 `/qq音乐登录` 没反应？**
+登录类命令（`/qq音乐登录`、`/网易云音乐登录`、`/163cookie`）只在私聊里执行，群里发送时 bot 只会回一句"请私聊发送"。二维码和 MUSIC_U 都是可直接登录的凭据，发在群里等于公开给所有人，也会明文留在聊天记录里。
 
 **Q：sidecar 启动失败？**
 检查 `rvc_root` 路径是否正确、`runtime/python.exe` 是否存在、端口 7898 是否被占用（日志会给出明确报错）。另外翻唱/说话都需要 GPU 显存，显存被其他任务占满时会报 ONNX CUDA 错误。
+
+**Q：日志提示「端口已被其它进程占用且未通过令牌握手」？**
+说明 7898 端口上的服务不是本插件拉起的（例如你手动启动但没配 `rvc.sidecar_token`，或是别的程序）。插件不会去终止一个无法确认归属的进程——请手动结束它，或把端口改到别的值；若那是你手动启动的 sidecar，把它的 `--token` 填到 `rvc.sidecar_token` 即可复用。
 
 **Q：语音缓存会无限增长吗？**
 不会。默认保留 5 天，超期自动清理；`voice_cache_retention_days` 可调，设 0 则永久保留。
@@ -306,37 +317,36 @@ QQ 音乐搜索/取链需要登录态：发 `/qq音乐登录` 扫码，或在配
 ## 八、依赖
 
 - **MaiBot 插件侧（Python 3.12）**：`aiohttp`、`httpx`、`cryptography`、`segno`
-- **RVC sidecar 侧（Python 3.9）**：复用 RVC 自带运行时，无额外依赖
+- **RVC sidecar 侧（Python 3.9）**：复用 RVC 自带运行时，无额外依赖（鉴权与地址校验都用标准库）
 
 ---
 
-## 九、目录结构
+## 九、隐私与合规
+
+- **仅克隆已获授权的音色**：本插件只可用于你自己的声音，或已取得明确授权的声音。禁止用他人声音伪造身份、制作虚假内容或冒充他人发言；音源与音色的合法性由使用者自行负责。
+- **登录凭据**：二维码、`MUSIC_U` 等会话凭据只在私聊中收发，且 `/163cookie` 发送的凭据会明文留在聊天记录里——用后请撤回；登录态缓存文件（`music_login_cache.json`）含账号凭证，不要外传，也不要提交进版本库。
+- **账号信息不外显**：登录测试与扫码结果只显示昵称，不显示账号 ID；插件日志不记录账号（手机号/邮箱）与 uin。
+- **本地服务**：sidecar 只监听 `127.0.0.1`，并要求请求头令牌一致；`rvc.sidecar_token` 与 `sidecar_state.json` 属于本地凭据，同样不要外传。
+- **出网限制**：下载音乐平台返回的音频直链时会校验协议与落点，不会请求内网/环回/链路本地地址。
+
+---
+
+## 十、目录结构
 
 ```
 maibot_sing-main/
-├── _manifest.json         # 插件清单（含 send.text/custom/image 能力声明）
+├── _manifest.json         # 插件清单（含 send.text/custom/image 能力声明，版本号以此为准）
 ├── plugin.py              # 主入口：命令 / Tool / 生命周期 / 登录编排 / 缓存清理
 ├── config.example.toml    # 配置模板
 ├── requirements.txt       # 插件依赖
 ├── README.md
-├── rvc_client.py          # sidecar HTTP 客户端
+├── rvc_client.py          # sidecar HTTP 客户端（带令牌鉴权头）
 ├── music/
 │   └── search.py          # 网易云/QQ 音乐搜索、取链、账号密码登录、QQ 扫码登录
 ├── services/
 │   ├── mimo_tts.py        # MiMo TTS（说话基础 TTS）
+│   ├── net_guard.py       # 外部下载地址校验（http(s) + 非内网/环回/链路本地）
 │   └── pipeline.py        # 编排：搜歌/TTS → 分离/转换/混伴奏 → 发送
 └── sidecar/
-    └── server.py          # RVC sidecar（Python 3.9）：分离 / 转换 / 混伴奏 / 自动变调
+    └── server.py          # RVC sidecar（Python 3.9）：分离 / 转换 / 混伴奏 / 自动变调 / 令牌鉴权
 ```
-
-## 特别鸣谢
-
-本项目在开发过程中使用了以下优秀的开源项目，特此致谢：
-
-- **[ling-tts-bot](https://github.com/Ling-LA/ling-tts-bot)** —— MaiBot 的 Xiaomi MiMo v2.5 音色克隆语音回复插件。
-
-- **[maibot-music](https://github.com/pan-ice/maibot-music)** —— MaiBot 音乐插件，支持搜索点歌、解析音乐链接、发送语音音频。
-
-- **[Retrieval-based-Voice-Conversion-WebUI (RVC)](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI)** —— 简单易用的语音音色转换/变声器框架，支持用少量语音数据快速训练高质量音色转换模型。
-
-- **[Ultimate Vocal Remover (UVR5)](https://github.com/leebufan/Ultimate-Vocal-Remover)** —— 基于深度神经网络的开源人声伴奏分离工具，是目前最优秀的人声分离工具之一。

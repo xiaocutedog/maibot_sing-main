@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -22,6 +23,7 @@ from maibot_sdk import (
 )
 from maibot_sdk.types import ActivationType, ToolParameterInfo, ToolParamType
 
+from . import __version__
 from .music.search import MusicSearchClient, MusicSearchError, SongInfo
 from .rvc_client import RVCClient, RVCSidecarError
 from .services.mimo_tts import MiMoTTSService
@@ -41,7 +43,7 @@ _B64_FALLBACK_MAX_BYTES = 8 * 1024 * 1024
 _COVER_DEDUP_WINDOW_S = 600
 # 期望的 sidecar 代码版本；sidecar/server.py 的 SIDECAR_VERSION 递增时同步修改。
 # 端口上已有服务版本不匹配（残留旧代码进程）时，插件会终止它并重新拉起
-EXPECTED_SIDECAR_VERSION = "4"
+EXPECTED_SIDECAR_VERSION = "5"
 
 
 # ===== 配置模型 =====
@@ -67,6 +69,11 @@ class RVCConfig(PluginConfigBase):
     python_path: str = Field(default="", description="RVC Python 解释器路径，留空自动用 {rvc_root}/runtime/python.exe")
     port: int = Field(default=7898, description="sidecar 监听端口（避开 7897 WebUI）")
     auto_start: bool = Field(default=True, description="插件加载时自动拉起 sidecar（端口已有服务则复用）")
+    sidecar_token: str = Field(
+        default="",
+        description="sidecar 鉴权令牌：留空则插件每次启动自动生成并持久化到运行时目录；"
+        "手动启动 sidecar 时把它的 --token 值填这里，插件才能复用它",
+    )
     default_model: str = Field(default="", description="默认音色模型（assets/weights 下的 .pth 文件名，含扩展名）")
     f0_method: str = Field(default="rmvpe", description="音高提取算法: pm/harvest/crepe/rmvpe")
     f0_up_key: int = Field(default=0, description="变调（半音数，升八度 12，降八度 -12）")
@@ -179,6 +186,9 @@ class SingPlugin(MaiBotPlugin):
         self._mimo: MiMoTTSService | None = None
         self._pipeline: Pipeline | None = None
         self._sidecar_proc: asyncio.subprocess.Process | None = None
+        # sidecar 鉴权令牌，以及该令牌是否由本插件生成（决定能否回收端口上的进程）
+        self._sidecar_token: str = ""
+        self._sidecar_token_owned: bool = False
         # 待选歌曲状态: stream_id -> (结果列表, 平台, 时间戳)
         self._pending: dict[str, tuple[list[SongInfo], str, float]] = {}
         self._pending_lock = asyncio.Lock()
@@ -196,15 +206,18 @@ class SingPlugin(MaiBotPlugin):
     # ===== 生命周期 =====
 
     async def on_load(self) -> None:
-        self.ctx.logger.info("翻唱插件加载中...")
+        self.ctx.logger.info("翻唱插件加载中... v%s", __version__)
         self._ensure_config_exists()
 
         # 每次启动先清理一次过期缓存（放在最前，避免被 sidecar 启动等待等慢步骤推迟）
         self._cache_cleanup_task = asyncio.create_task(self._voice_cache_cleanup_loop())
 
-        # 初始化 RVC sidecar 客户端
+        # 初始化 RVC sidecar 客户端（带鉴权令牌）
+        self._init_sidecar_token()
         port = self.config.rvc.port
-        self._rvc = RVCClient(f"http://127.0.0.1:{port}", logger=self.ctx.logger)
+        self._rvc = RVCClient(
+            f"http://127.0.0.1:{port}", logger=self.ctx.logger, token=self._sidecar_token
+        )
 
         # 自动拉起 sidecar（或复用已有服务）
         if self.config.rvc.auto_start:
@@ -261,7 +274,10 @@ class SingPlugin(MaiBotPlugin):
             await self._rvc.close()
         await self._stop_sidecar()
 
-        self._rvc = RVCClient(f"http://127.0.0.1:{self.config.rvc.port}", logger=self.ctx.logger)
+        self._init_sidecar_token()
+        self._rvc = RVCClient(
+            f"http://127.0.0.1:{self.config.rvc.port}", logger=self.ctx.logger, token=self._sidecar_token
+        )
         if self.config.rvc.auto_start:
             await self._start_sidecar()
         self._music = self._build_music_client()
@@ -303,30 +319,134 @@ class SingPlugin(MaiBotPlugin):
     def _sidecar_script_path(self) -> str:
         return str(Path(__file__).parent / "sidecar" / "server.py")
 
+    def _sidecar_state_path(self) -> Path:
+        return Path(self.ctx.paths.runtime_dir) / "sidecar_state.json"
+
+    def _load_sidecar_token(self) -> str:
+        """读取上次生成的 sidecar 令牌（重启后可继续接管自己拉起的进程）。"""
+        try:
+            with open(self._sidecar_state_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            return str(data.get("token", "") or "") if isinstance(data, dict) else ""
+        except Exception:
+            return ""
+
+    def _save_sidecar_token(self, token: str) -> None:
+        path = self._sidecar_state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"token": token, "port": self.config.rvc.port}, f, ensure_ascii=False, indent=2)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except Exception as exc:
+            self.ctx.logger.warning("保存 sidecar 令牌失败: %s", exc)
+
+    def _init_sidecar_token(self) -> None:
+        """确定本次运行的 sidecar 鉴权令牌。
+
+        令牌来自配置时视作"用户自己管理的进程"，插件只复用不回收；
+        由插件生成并持久化的令牌则代表"本插件拉起的进程"，可以安全地接管与回收。
+        """
+        configured = self.config.rvc.sidecar_token.strip()
+        if configured:
+            self._sidecar_token = configured
+            self._sidecar_token_owned = False
+            return
+        token = self._load_sidecar_token()
+        if not token:
+            token = secrets.token_urlsafe(32)
+            self._save_sidecar_token(token)
+        self._sidecar_token = token
+        self._sidecar_token_owned = True
+
+    async def _probe_sidecar(self) -> tuple[dict[str, Any] | None, bool]:
+        """探测本机端口上的 sidecar，返回 (健康信息, 是否通过令牌握手)。
+
+        只有握手通过才能确认端口上确实是本插件拉起的 sidecar；
+        返回值第二项为 False 时调用方不得终止该进程。
+        """
+        rvc = self._rvc
+        if rvc is None:
+            return None, False
+        try:
+            health = await rvc.health()
+        except Exception:
+            return None, False
+        if not isinstance(health, dict):
+            return None, False
+        expected = rvc.auth_proof()
+        provided = str(health.get("auth", "") or "")
+        if not expected:
+            return health, False
+        return health, bool(provided) and secrets.compare_digest(provided, expected)
+
+    @staticmethod
+    async def _port_listening(port: int) -> bool:
+        """检测本机端口上是否已有进程在监听。"""
+        writer = None
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=1.0)
+        except Exception:
+            return False
+        finally:
+            if writer is not None:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        return True
+
     async def _start_sidecar(self) -> None:
-        """拉起 sidecar；端口已有服务时版本匹配则复用，残留旧代码进程则终止后重启。"""
+        """拉起 sidecar；端口已有本插件自己的服务时版本匹配则复用，过旧则回收重启。
+
+        端口上的服务若通不过令牌握手（旧版本无鉴权 sidecar、或其它程序的进程），
+        只报告不终止——避免把同主机任意进程当成自己的 sidecar 回收。
+        """
         rvc = self._rvc
         if rvc is None:
             return
         port = self.config.rvc.port
 
-        # 先探测端口是否已有服务
-        try:
-            health = await rvc.health()
-        except Exception:
-            health = None
-
-        if health and health.get("status") == "ready":
+        health, authenticated = await self._probe_sidecar()
+        if health is not None and not authenticated:
+            self.ctx.logger.error(
+                "端口 %s 上的服务未通过令牌握手（版本 %s），可能是旧版本 sidecar 或其它进程；"
+                "插件不会终止它。请手动结束该进程，或改用其它 rvc.port 后重启插件",
+                port, str(health.get("version", "") or "未知"),
+            )
+            return
+        if health is not None:
             version = str(health.get("version", "") or "")
             if version == EXPECTED_SIDECAR_VERSION:
                 self.ctx.logger.info("复用已运行的 sidecar: %s", port)
                 return
-            # 版本不匹配：端口上是旧代码的残留进程，终止后重新拉起
+            if not self._sidecar_token_owned:
+                self.ctx.logger.error(
+                    "端口 %s 上的 sidecar 代码版本过旧（%s != %s），但其令牌来自配置"
+                    "（视为用户自行管理的进程），插件不会自动终止；请手动重启该 sidecar",
+                    port, version or "未知", EXPECTED_SIDECAR_VERSION,
+                )
+                return
+            # 版本不匹配：端口上是本插件拉起的旧代码进程，回收后重新拉起
             self.ctx.logger.warning(
                 "端口 %s 上的 sidecar 代码版本过旧（%s != %s），终止后重新拉起",
                 port, version or "未知", EXPECTED_SIDECAR_VERSION,
             )
-            await self._terminate_stale_sidecar(health)
+            await self._terminate_owned_sidecar()
+        elif await self._port_listening(port):
+            self.ctx.logger.error(
+                "端口 %s 已被其它进程占用且未通过令牌握手，插件不会终止它；"
+                "请改用其它 rvc.port，或手动结束该进程后重启插件", port,
+            )
+            return
+
+        if await self._port_listening(port):
+            self.ctx.logger.error("端口 %s 仍被占用，无法拉起 sidecar；请手动结束占用进程后重启插件", port)
+            return
 
         rvc_root = self.config.rvc.rvc_root
         python_exe = self._resolve_python_path()
@@ -341,67 +461,85 @@ class SingPlugin(MaiBotPlugin):
 
         self.ctx.logger.info("拉起 sidecar: %s %s --rvc-root %s --port %s", python_exe, script, rvc_root, port)
         try:
-            self._sidecar_proc = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 python_exe,
                 script,
                 "--rvc-root",
                 rvc_root,
                 "--port",
                 str(port),
+                "--token-stdin",
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
             self.ctx.logger.error("拉起 sidecar 失败: %s", exc)
             return
+        self._sidecar_proc = proc
+        await self._send_sidecar_token(proc)
 
         # 等待 sidecar 就绪（模型加载可能较慢，但服务本身几秒内可响应 /health）
         for _ in range(60):
-            if self._sidecar_proc is not None and self._sidecar_proc.returncode is not None:
-                self.ctx.logger.error("sidecar 进程提前退出，退出码: %s", self._sidecar_proc.returncode)
+            if proc.returncode is not None:
+                self.ctx.logger.error("sidecar 进程提前退出，退出码: %s", proc.returncode)
                 return
-            try:
-                health = await rvc.health()
-                if health.get("status") == "ready":
-                    self.ctx.logger.info("sidecar 已就绪: %s", port)
-                    return
-            except Exception:
-                pass
+            health, authenticated = await self._probe_sidecar()
+            if authenticated and health is not None and health.get("status") == "ready":
+                self.ctx.logger.info("sidecar 已就绪: %s", port)
+                return
+            if health is not None and not authenticated:
+                self.ctx.logger.error(
+                    "sidecar 已响应但未通过令牌握手（令牌可能未送达），停止等待；请重启插件重试"
+                )
+                return
             await asyncio.sleep(1)
         self.ctx.logger.warning("等待 sidecar 就绪超时（60s），可能仍在加载模型")
 
-    async def _terminate_stale_sidecar(self, health: dict[str, Any]) -> None:
-        """终止版本过旧的 sidecar 进程并等待端口释放。"""
+    async def _send_sidecar_token(self, proc: asyncio.subprocess.Process) -> None:
+        """把鉴权令牌写入 sidecar 的 stdin。
+
+        令牌不经过命令行参数与环境变量，避免被同主机其它进程从进程信息里读到。
+        """
+        if proc.stdin is None:
+            self.ctx.logger.error("sidecar stdin 不可用，无法传递鉴权令牌")
+            return
+        try:
+            proc.stdin.write((self._sidecar_token + "\n").encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except Exception as exc:
+            self.ctx.logger.error("向 sidecar 传递鉴权令牌失败: %s", exc)
+
+    async def _terminate_owned_sidecar(self) -> None:
+        """终止本插件自己拉起的旧版本 sidecar，并等待端口释放。
+
+        只处理自有进程：有子进程句柄时直接终止；句柄已丢失（如上次 MaiBot 异常退出遗留）
+        时凭令牌请它自行退出，绝不按 /health 里的 PID 给未知进程发信号。
+        """
+        rvc = self._rvc
         proc = self._sidecar_proc
+        self._sidecar_proc = None
         if proc is not None and proc.returncode is None:
             proc.terminate()
-        else:
-            # 进程不是本实例拉起的（如上次 MaiBot 异常退出遗留），按 /health 里的 PID 结束
-            pid = health.get("pid")
+        elif rvc is not None:
             try:
-                if pid:
-                    os.kill(int(pid), 9)
+                await rvc.shutdown()
             except Exception as exc:
-                self.ctx.logger.warning("结束旧 sidecar 进程（pid=%s）失败: %s", pid, exc)
-        self._sidecar_proc = None
-        # 等旧进程释放端口
+                self.ctx.logger.warning("请求旧 sidecar 退出失败: %s", exc)
+        port = self.config.rvc.port
         for _ in range(10):
-            try:
-                await self._rvc.health()
-                await asyncio.sleep(0.5)
-            except Exception:
+            if not await self._port_listening(port):
                 return
+            await asyncio.sleep(0.5)
 
     async def _ensure_sidecar_ready(self) -> None:
         """发起转换前确保 sidecar 存活；崩溃或被结束后自动重新拉起。"""
         if self._rvc is None:
             return
-        try:
-            health = await self._rvc.health()
-            if health.get("status") == "ready":
-                return
-        except Exception:
-            pass
+        health, authenticated = await self._probe_sidecar()
+        if authenticated and health is not None and health.get("status") == "ready":
+            return
         self.ctx.logger.warning("sidecar 未就绪，自动重新拉起")
         await self._start_sidecar()
 
@@ -469,7 +607,7 @@ class SingPlugin(MaiBotPlugin):
             and qq_cache.get("qqmusic_key")
         ):
             self._music.apply_qq_cookies({k: str(v) for k, v in qq_cache.items()})
-            self.ctx.logger.info("已恢复 QQ 音乐缓存登录态: uin=%s", qq_cache["uin"])
+            self.ctx.logger.info("已恢复 QQ 音乐缓存登录态")
 
         # 网易云：恢复持久化的设备 ID 与匿名 token（扫码接口需要，避免重复注册被限频）
         device = cache.get("netease_device") if isinstance(cache.get("netease_device"), dict) else {}
@@ -518,7 +656,8 @@ class SingPlugin(MaiBotPlugin):
         cookies = await self._music.login_netease(account, password, cfg.netease_countrycode)
         self._save_login_cache("netease", {"account": account, "cookies": cookies})
         profile = await self._music.get_netease_profile()
-        self.ctx.logger.info("网易云自动登录成功: %s", account)
+        # 日志不落账号（手机号/邮箱），只记结果，避免账号信息进日志文件
+        self.ctx.logger.info("网易云自动登录成功")
         return f"网易云登录成功：{profile['nickname']}"
 
     # ===== 工具方法 =====
@@ -718,6 +857,28 @@ class SingPlugin(MaiBotPlugin):
                 return sid
         return ""
 
+    @staticmethod
+    def _is_group_chat(kwargs: dict[str, Any]) -> bool:
+        """判断本次调用是否来自群聊。
+
+        登录二维码与 MUSIC_U 这类会话凭据一旦发到群里，就等于暴露给所有群成员，
+        并会明文留在宿主聊天记录里，因此只在私聊中处理。
+        """
+        if str(kwargs.get("group_id", "") or "").strip():
+            return True
+        message = kwargs.get("message")
+        if isinstance(message, dict):
+            info = message.get("message_info")
+            if isinstance(info, dict) and info.get("group_info"):
+                return True
+        return False
+
+    async def _reject_login_in_group(self, command: str, stream_id: str, reason: str) -> tuple[bool, str, bool]:
+        """群聊里发起登录时的统一提示。"""
+        hint = f"{reason}请私聊我发送 {command}"
+        await self.ctx.send.text(hint, stream_id)
+        return False, hint, True
+
     # ===== 命令 =====
 
     @Command(
@@ -809,41 +970,57 @@ class SingPlugin(MaiBotPlugin):
 
     @Command(
         "qq音乐登录",
-        description="发起 QQ 音乐扫码登录，bot 发送二维码，手机 QQ 扫码确认即可（仅管理员可用）",
+        description="发起 QQ 音乐扫码登录，bot 在私聊里发送二维码，手机 QQ 扫码确认即可（仅管理员、仅私聊）",
         pattern=r"^(?P<pfx>\S)qq音乐登录\s*$",
         permission="operator",
         timeout_ms=60_000,
     )
     async def handle_qq_music_login(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        if self._is_group_chat(kwargs):
+            return await self._reject_login_in_group(
+                "/qq音乐登录", stream_id, "登录二维码只能在私聊里发送（群聊会把二维码暴露给所有人）。"
+            )
         self._start_qq_qrcode_login(stream_id)
         return True, "QQ 扫码登录已发起", True
 
     @Command(
         "网易云音乐登录",
-        description="发起网易云扫码登录，bot 发送二维码，网易云音乐 App 扫码确认即可（仅管理员可用）",
+        description="发起网易云扫码登录，bot 在私聊里发送二维码，网易云音乐 App 扫码确认即可（仅管理员、仅私聊）",
         pattern=r"^(?P<pfx>\S)网易云音乐登录\s*$",
         permission="operator",
         timeout_ms=60_000,
     )
     async def handle_netease_music_login(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        if self._is_group_chat(kwargs):
+            return await self._reject_login_in_group(
+                "/网易云音乐登录", stream_id, "登录二维码只能在私聊里发送（群聊会把二维码暴露给所有人）。"
+            )
         self._start_netease_qrcode_login(stream_id)
         return True, "网易云扫码登录已发起", True
 
     @Command(
         "163cookie",
-        description="用网易云 MUSIC_U cookie 登录（仅管理员可用）",
+        description="用网易云 MUSIC_U cookie 登录（仅管理员、仅私聊）",
         pattern=r"^(?P<pfx>\S)163cookie(?:\s+(?P<cookie>.+))?\s*$",
         permission="operator",
         timeout_ms=60_000,
     )
     async def handle_netease_cookie_login(self, stream_id: str = "", **kwargs: Any) -> tuple[bool, str, bool]:
+        if self._is_group_chat(kwargs):
+            return await self._reject_login_in_group(
+                "/163cookie <MUSIC_U 值>",
+                stream_id,
+                "MUSIC_U 是账号会话凭据，粘贴在群里等于把它交给所有群成员，并会明文留在聊天记录里。",
+            )
         matched = kwargs.get("matched_groups")
         cookie_value = str(matched.get("cookie", "") or "").strip() if isinstance(matched, dict) else ""
         if not cookie_value:
             await self.ctx.send.text(
                 "用法：/163cookie <MUSIC_U 值>\n"
                 "获取：电脑浏览器登录 music.163.com → F12 → 应用/Storage → Cookie → 复制 MUSIC_U 的值\n"
-                "（也可整段粘贴含 MUSIC_U=xxx; __csrf=yyy 的 cookie 字符串）", stream_id)
+                "（也可整段粘贴含 MUSIC_U=xxx; __csrf=yyy 的 cookie 字符串）\n"
+                "⚠️ 请在私聊里发送，登录成功后请撤回/删除这条消息——MUSIC_U 等同于登录态，"
+                "留在聊天记录里就等于把账号会话留在了那里", stream_id)
             return False, "缺少 cookie", True
         if self._music is None:
             await self.ctx.send.text("音乐客户端未初始化", stream_id)
@@ -861,7 +1038,9 @@ class SingPlugin(MaiBotPlugin):
             await self.ctx.send.text(f"❌ cookie 校验失败（可能已过期）：{exc}", stream_id)
             return False, str(exc), True
         self._save_login_cache("netease", {"account": "cookie", "cookies": self._music.get_netease_cookies()})
-        await self.ctx.send.text(f"✅ 网易云登录正常：{profile['nickname']}", stream_id)
+        await self.ctx.send.text(
+            f"✅ 网易云登录正常：{profile['nickname']}（建议撤回上面那条含 cookie 的消息）", stream_id
+        )
         return True, f"网易云 cookie 登录: {profile['nickname']}", True
 
     @Command(
@@ -949,7 +1128,7 @@ class SingPlugin(MaiBotPlugin):
                 scanned_notified = True
                 await self.ctx.send.text("已扫码，请在手机上确认登录", stream_id)
             elif state == "expired":
-                await self.ctx.send.text("二维码已过期，请重新发送 /音乐登录 qq", stream_id)
+                await self.ctx.send.text("二维码已过期，请重新发送 /qq音乐登录", stream_id)
                 return
             elif state == "success":
                 uin, sigx = extra.split("|", 1)
@@ -959,7 +1138,15 @@ class SingPlugin(MaiBotPlugin):
                     await self.ctx.send.text(f"QQ 登录失败：{exc}", stream_id)
                     return
                 self._save_login_cache("qq", cookies)
-                await self.ctx.send.text(f"QQ 音乐登录成功（uin={cookies['uin']}），登录态已保存", stream_id)
+                # 只回昵称，不回 uin（uin 就是账号本身）
+                msg = "QQ 音乐登录成功"
+                try:
+                    nickname = (await music.get_qq_profile())["nickname"]
+                except Exception:
+                    nickname = ""
+                if nickname:
+                    msg += f"：{nickname}"
+                await self.ctx.send.text(msg + "，登录态已保存", stream_id)
                 return
         await self.ctx.send.text("等待扫码超时，请重新发送 /qq音乐登录", stream_id)
 

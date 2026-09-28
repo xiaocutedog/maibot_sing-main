@@ -13,6 +13,25 @@ from ..music.search import MusicSearchClient, SongInfo
 from ..rvc_client import RVCClient
 
 from .mimo_tts import MiMoTTSService
+from .net_guard import MAX_REDIRECTS, REDIRECT_STATUS, ExternalURLBlocked, ensure_external_url, resolve_redirect
+
+
+async def _download_external(session: Any, url: str, *, timeout: Any) -> bytes:
+    """下载外部音频直链，逐跳校验协议与落点。
+
+    ``allow_redirects=False`` + 手动跟随，保证每一跳都先过 ``ensure_external_url``，
+    否则平台侧一个指向内网/云元数据地址的 302 就会被直接跟随。
+    """
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        await ensure_external_url(current)
+        async with session.get(current, timeout=timeout, allow_redirects=False) as resp:
+            if resp.status in REDIRECT_STATUS:
+                current = resolve_redirect(current, resp.headers.get("Location", ""))
+                continue
+            resp.raise_for_status()
+            return await resp.read()
+    raise ExternalURLBlocked(f"下载地址跳转次数超过 {MAX_REDIRECTS} 次，已放弃: {url}")
 
 
 class Pipeline:
@@ -66,9 +85,9 @@ class Pipeline:
         import aiohttp
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(audio_url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                resp.raise_for_status()
-                song_audio = await resp.read()
+            song_audio = await _download_external(
+                session, audio_url, timeout=aiohttp.ClientTimeout(total=120)
+            )
 
         self.logger.info("下载整曲完成: %s, %d bytes", song.display(), len(song_audio))
         converted = await self.rvc.cover(

@@ -11,6 +11,9 @@ python_path = ""
 port = 7898
 # 插件加载时自动拉起 sidecar（端口已有服务则复用）
 auto_start = true
+# sidecar 鉴权令牌：留空由插件自动生成并持久化到运行时目录（sidecar_state.json）。
+# 手动启动 sidecar 时会用到它的 --token 值，把同一个值填这里插件才会复用它
+sidecar_token = ""
 # 默认音色模型（assets/weights 下的 .pth 文件名，含扩展名）
 default_model = ""
 # 音高提取算法: pm / harvest / crepe / rmvpe
