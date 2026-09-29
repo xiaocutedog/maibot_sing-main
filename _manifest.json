@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "xiaocutedog.maibot-sing",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "name": "让麦麦说话和唱歌",
   "description": "用 RVC 克隆音色翻唱歌曲和说话，内嵌音乐搜索（网易云/QQ）与 MiMo TTS",
   "author": {
