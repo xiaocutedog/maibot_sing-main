@@ -336,6 +336,8 @@ QQ 音乐搜索/取链需要登录态：私聊发 `/qq音乐登录` 扫码，或
 ```
 maibot_sing-main/
 ├── _manifest.json         # 插件清单（含 send.text/custom/image 能力声明，版本号以此为准）
+├── _version.py            # 版本号读取（宿主直接加载 plugin.py，版本不能放在 __init__.py）
+├── __init__.py            # 包声明，转发 __version__
 ├── plugin.py              # 主入口：命令 / Tool / 生命周期 / 登录编排 / 缓存清理
 ├── config.example.toml    # 配置模板
 ├── requirements.txt       # 插件依赖
