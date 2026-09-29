@@ -23,7 +23,7 @@ from maibot_sdk import (
 )
 from maibot_sdk.types import ActivationType, ToolParameterInfo, ToolParamType
 
-from . import __version__
+from ._version import __version__
 from .music.search import MusicSearchClient, MusicSearchError, SongInfo
 from .rvc_client import RVCClient, RVCSidecarError
 from .services.mimo_tts import MiMoTTSService
